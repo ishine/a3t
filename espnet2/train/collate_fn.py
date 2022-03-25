@@ -117,7 +117,8 @@ class MLMCollateFn:
         attention_window: int=0,
         pad_speech: bool=False,
         sega_emb: bool=False,
-        duration_collect: bool=False
+        duration_collect: bool=False,
+        text_masking: bool=False
 
     ):
         self.mlm_prob=mlm_prob
@@ -130,6 +131,7 @@ class MLMCollateFn:
         self.pad_speech=pad_speech
         self.sega_emb=sega_emb
         self.duration_collect = duration_collect
+        self.text_masking = text_masking
 
     def __repr__(self):
         return (
@@ -151,7 +153,8 @@ class MLMCollateFn:
             attention_window=self.attention_window,
             pad_speech=self.pad_speech,
             sega_emb=self.sega_emb,
-            duration_collect=self.duration_collect
+            duration_collect=self.duration_collect,
+            text_masking=self.text_masking
         )
 
 
@@ -167,6 +170,7 @@ def mlm_collate_fn(
     pad_speech: bool=False,
     sega_emb: bool=False,
     duration_collect: bool=False,
+    text_masking: bool=False
 ) -> Tuple[List[str], Dict[str, torch.Tensor]]:
     """Concatenate ndarray-list to an array and convert to torch.Tensor.
 
@@ -253,15 +257,29 @@ def mlm_collate_fn(
     if 'span_boundary' in output.keys():
         span_boundary = output['span_boundary']
 
-    masked_position, _ = phones_masking(
+    if text_masking:
+        masked_position, text_masked_position,_ = phones_text_masking(
             speech_pad,
             speech_mask,
+            text_pad, 
+            text_mask,
             align_start,
             align_end,
             align_start_lengths,
             mlm_prob,
             mean_phn_span,
             span_boundary)
+    else:
+        text_masked_position = np.zeros(text_pad.size())
+        masked_position, _ = phones_masking(
+                speech_pad,
+                speech_mask,
+                align_start,
+                align_end,
+                align_start_lengths,
+                mlm_prob,
+                mean_phn_span,
+                span_boundary)
 
     output_dict = {}
     if duration_collect and 'text' in output:
@@ -271,10 +289,10 @@ def mlm_collate_fn(
         output_dict['reordered_index'] = reordered_index
     else:
         speech_segment_pos, text_segment_pos = get_segment_pos(speech_pad, text_pad, align_start, align_end, align_start_lengths,sega_emb)
-    
     output_dict['speech'] = speech_pad
     output_dict['text'] = text_pad
     output_dict['masked_position'] = masked_position
+    output_dict['text_masked_position'] = text_masked_position
     output_dict['speech_mask'] = speech_mask
     output_dict['text_mask'] = text_mask
     output_dict['speech_segment_pos'] = speech_segment_pos
@@ -383,6 +401,60 @@ def phones_masking(xs_pad, src_mask, align_start, align_end, align_start_lengths
     # y_masks = src_mask & y_masks.bool()
 
     return torch.BoolTensor(masked_position).to(xs_pad.device), y_masks
+
+
+
+def phones_text_masking(xs_pad, src_mask, text_pad, text_mask, align_start, align_end, align_start_lengths, mlm_prob, mean_phn_span, span_boundary=None):
+    bz, sent_len, _ = xs_pad.size()
+    mask_num_lower = math.ceil(sent_len * mlm_prob)
+    masked_position = np.zeros((bz, sent_len))
+    _, text_len = text_pad.size()
+    text_mask_num_lower = math.ceil(text_len * (1-mlm_prob)*0.5)
+    text_masked_position = np.zeros((bz, text_len))
+    y_masks = None
+    # y_masks = torch.ones(bz,sent_len,sent_len,device=xs_pad.device,dtype=xs_pad.dtype)
+    # tril_masks = torch.tril(y_masks)
+    if mlm_prob == 1.0:
+        masked_position += 1
+        # y_masks = tril_masks
+    elif mean_phn_span == 0:
+        # only speech 
+        length = sent_len
+        mean_phn_span = min(length*mlm_prob//3, 50)
+        masked_phn_indices = random_spans_noise_mask(length,mlm_prob, mean_phn_span).nonzero()
+        masked_position[:,masked_phn_indices]=1
+    else:
+        for idx in range(bz):
+            if span_boundary is not None:
+                for s,e in zip(span_boundary[idx][::2], span_boundary[idx][1::2]):
+                    masked_position[idx, s:e] = 1
+
+                    # y_masks[idx, :, s:e] = tril_masks[idx, :, s:e]
+                    # y_masks[idx, e:, s:e ] = 0
+            else:
+                length = align_start_lengths[idx].item()
+                if length<2:
+                    continue
+                masked_phn_indices = random_spans_noise_mask(length,mlm_prob, mean_phn_span).nonzero()
+                unmasked_phn_indices = list(set(range(length))-set(masked_phn_indices[0].tolist()))
+                np.random.shuffle(unmasked_phn_indices)
+                masked_text_indices = unmasked_phn_indices[:text_mask_num_lower]
+                text_masked_position[idx][masked_text_indices] = 1
+                masked_start = align_start[idx][masked_phn_indices].tolist()
+                masked_end = align_end[idx][masked_phn_indices].tolist()
+                for s,e in zip(masked_start, masked_end):
+                    masked_position[idx, s:e] = 1
+                    # y_masks[idx, :, s:e] = tril_masks[idx, :, s:e]
+                    # y_masks[idx, e:, s:e ] = 0
+    non_eos_mask = src_mask.view(xs_pad.size()[:2]).float().cpu().numpy()
+    masked_position = masked_position * non_eos_mask
+    non_eos_mask = text_mask.view(text_pad.size()[:2]).float().cpu().numpy()
+    text_masked_position = text_masked_position * non_eos_mask
+    # y_masks = src_mask & y_masks.bool()
+
+    return torch.BoolTensor(masked_position).to(xs_pad.device), torch.BoolTensor(text_masked_position).to(text_pad.device), y_masks
+
+
 
 def random_spans_noise_mask(length, mlm_prob, mean_phn_span):
 

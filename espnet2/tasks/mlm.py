@@ -26,7 +26,7 @@ from espnet.nets.pytorch_backend.transformer.encoder import MLMDecoder as Transf
 from espnet.nets.pytorch_backend.conformer.encoder import MLMEncoder as ConformerEncoder
 from espnet.nets.pytorch_backend.conformer.encoder import MLMDecoder as ConformerDecoder
 
-from espnet2.tts.sedit.sedit_model import ESPnetMLMModel,ESPnetMLMEncAsDecoderModel,ESPnetMLMTTSModel
+from espnet2.tts.sedit.sedit_model import ESPnetMLMModel,ESPnetMLMEncAsDecoderModel,ESPnetMLMTTSModel,ESPnetMLMDualMaksingModel
 from espnet2.train.abs_espnet_model import AbsESPnetModel
 
 from espnet2.asr.postencoder.hugging_face_transformers_postencoder import (
@@ -287,8 +287,12 @@ class MLMTask(AbsTask):
             duration_collect=True
         else:
             duration_collect=False
+        if 'text_masking' in args.model_conf.keys() and args.model_conf['text_masking']:
+            text_masking = True
+        else:
+            text_masking = False
         return MLMCollateFn(feats_extract, float_pad_value=0.0, int_pad_value=0,
-        mlm_prob=args.model_conf['mlm_prob']*mlm_prob_factor,mean_phn_span=args.model_conf['mean_phn_span'],attention_window=attention_window,pad_speech=pad_speech,sega_emb=sega_emb,duration_collect=duration_collect)
+        mlm_prob=args.model_conf['mlm_prob']*mlm_prob_factor,mean_phn_span=args.model_conf['mean_phn_span'],attention_window=attention_window,pad_speech=pad_speech,sega_emb=sega_emb,duration_collect=duration_collect, text_masking=text_masking)
 
     @classmethod
     def build_preprocess_fn(
@@ -398,6 +402,11 @@ class MLMTask(AbsTask):
         # 4. Encoder
         encoder_class = encoder_choices.get_class(args.encoder)
         
+        if 'text_masking' in args.model_conf.keys() and args.model_conf['text_masking']:
+            args.encoder_conf['text_masking'] = True
+        else:
+            args.encoder_conf['text_masking'] = False
+        
         encoder = encoder_class(args.input_size,vocab_size=vocab_size, pos_enc_class=pos_enc_class,
         **args.encoder_conf)
 
@@ -422,6 +431,16 @@ class MLMTask(AbsTask):
             decoder=decoder,
             token_list=token_list,
             **args.model_conf,
+            )
+        elif 'text_masking' in args.model_conf.keys() and args.model_conf['text_masking']:
+            model = ESPnetMLMDualMaksingModel(
+                feats_extract=feats_extract,
+                odim=odim,
+                normalize=normalize,
+                encoder=encoder,
+                decoder=decoder,
+                token_list=token_list,
+                **args.model_conf,
             )
         else:
             model = ESPnetMLMEncAsDecoderModel(

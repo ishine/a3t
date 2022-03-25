@@ -340,10 +340,14 @@ class MLMEncoder(torch.nn.Module):
         padding_idx=-1,
         stochastic_depth_rate=0.0,
         intermediate_layers=None,
+        text_masking = False
     ):
         """Construct an Encoder object."""
         super(MLMEncoder, self).__init__()
         self._output_size = attention_dim
+        self.text_masking=text_masking
+        if self.text_masking:
+            self.text_masking_layer = NewMaskInputLayer(attention_dim)
         activation = get_activation(activation_type)
         if pos_enc_layer_type == "abs_pos":
             pos_enc_class = PositionalEncoding
@@ -519,7 +523,8 @@ class MLMEncoder(torch.nn.Module):
 
         self.intermediate_layers = intermediate_layers
 
-    def forward(self, speech_pad, text_pad, masked_position, speech_mask=None, text_mask=None,speech_segment_pos=None, text_segment_pos=None):
+    def forward(self, speech_pad, text_pad, masked_position, speech_mask=None, text_mask=None,speech_segment_pos=None, text_segment_pos=None,
+    text_masked_position=None):
         """Encode input sequence.
 
         """
@@ -533,10 +538,14 @@ class MLMEncoder(torch.nn.Module):
             text_mask = text_pad.bool().unsqueeze(1)
             text_segment_pos = torch.zeros_like(text_pad)
             text_pad = self.text_embed(text_pad)
+            if text_masked_position is not None:
+                text_pad = (self.text_masking_layer(text_pad[0],text_masked_position),text_pad[1])
             text_pad = (text_pad[0] + self.segment_emb(text_segment_pos), text_pad[1])
             text_segment_pos=None
         elif text_pad is not None:
             text_pad = self.text_embed(text_pad)
+            if text_masked_position is not None:
+                text_pad = (self.text_masking_layer(text_pad[0],text_masked_position),text_pad[1])
         segment_emb = None
         if speech_segment_pos is not None and text_segment_pos is not None and self.segment_emb:
             speech_segment_emb = self.segment_emb(speech_segment_pos)

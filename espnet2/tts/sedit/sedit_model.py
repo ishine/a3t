@@ -68,6 +68,7 @@ class ESPnetMLMModel(AbsESPnetModel):
         mlm_prob: float = 0.25,
         dynamic_mlm_prob = False,
         decoder_seg_pos=False,
+        text_masking=False,
     ):
 
         super().__init__()
@@ -80,7 +81,7 @@ class ESPnetMLMModel(AbsESPnetModel):
         self.encoder = encoder
 
         self.decoder = decoder
-
+        self.vocab_size = encoder.text_embed[0].num_embeddings
         if report_cer or report_wer:
             self.error_calculator = ErrorCalculator(
                 token_list, sym_space, sym_blank, report_cer, report_wer
@@ -101,6 +102,13 @@ class ESPnetMLMModel(AbsESPnetModel):
             self.sfc = torch.nn.Linear(self.encoder._output_size, odim)
         else:
             self.sfc=None
+        if text_masking:
+            self.text_sfc =  torch.nn.Linear(self.encoder.text_embed[0].embedding_dim, self.vocab_size)
+            self.text_sfc.weight = self.encoder.text_embed[0].weight
+            self.text_mlm_loss = torch.nn.CrossEntropyLoss(ignore_index=ignore_id)
+        else:
+            self.text_sfc = None
+            self.text_mlm_loss = None
         self.decoder_seg_pos = decoder_seg_pos
         if lsm_weight > 50:
             self.l1_loss_func = torch.nn.MSELoss(reduce=False)
@@ -154,7 +162,7 @@ class ESPnetMLMModel(AbsESPnetModel):
 
     def forward(
         self,
-        speech, text, masked_position, speech_mask, text_mask, speech_segment_pos, text_segment_pos, y_masks=None,speech_lengths=None, text_lengths=None
+        speech, text, masked_position, speech_mask, text_mask, speech_segment_pos, text_segment_pos, y_masks=None,speech_lengths=None, text_lengths=None, text_masked_position=None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
 
         batch_size = speech.shape[0]
@@ -556,3 +564,95 @@ class ESPnetMLMTTSModel(ESPnetMLMModel):
         outs += [batch['speech_pad'][:,span_boundary[1]:]]
         return dict(feat_gen=outs, att_w=att_ws)
 
+class ESPnetMLMDualMaksingModel(ESPnetMLMModel):
+
+    def _calc_mlm_loss(
+        self,
+        before_outs: torch.Tensor,
+        after_outs: torch.Tensor,
+        text_outs: torch.Tensor,
+        batch
+    ):
+        xs_pad = batch['speech_pad']
+        text_pad = batch['text_pad']
+        masked_position = batch['masked_position']
+        text_masked_position = batch['text_masked_position']
+        mlm_loss_position = masked_position>0
+        loss = self.l1_loss_func(before_outs.view(-1, self.odim), 
+                                            xs_pad.view(-1, self.odim)).sum(dim=-1)
+        if after_outs is not None:
+            loss += self.l1_loss_func(after_outs.view(-1, self.odim), 
+                                                xs_pad.view(-1, self.odim)).sum(dim=-1)
+        loss_mlm = (loss * mlm_loss_position.view(-1).float()).sum() \
+                                            / (mlm_loss_position.float().sum() + 1e-10)
+
+        loss_text = (self.text_mlm_loss(text_outs.view(-1,self.vocab_size), text_pad.view(-1)) *text_masked_position.view(-1).float()).sum() \
+            /  (text_masked_position.float().sum() + 1e-10)
+        return loss_mlm, loss_text
+
+    def forward(
+        self,
+        speech, text, masked_position, speech_mask, text_mask, speech_segment_pos, text_segment_pos, y_masks=None,speech_lengths=None, text_lengths=None, text_masked_position=None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+
+        batch_size = speech.shape[0]
+        if not self.train:
+            text_masked_position = None
+        batch = dict(
+            speech_pad=speech,
+            text_pad=text,
+            masked_position=masked_position,
+            speech_mask=speech_mask,
+            text_mask=text_mask,
+            speech_segment_pos=speech_segment_pos,
+            text_segment_pos=text_segment_pos,
+            text_masked_position=text_masked_position,
+        )
+        before_outs, after_outs, text_outs = self._forward(batch, speech_segment_pos,y_masks)
+
+
+        loss_mlm, loss_text_mlm = self._calc_mlm_loss(
+            before_outs,after_outs, text_outs,batch
+        )
+        loss = loss_mlm + loss_text_mlm if loss_text_mlm is not None else loss_mlm 
+
+        stats = dict(
+            loss=loss.detach(),
+            loss_mlm=loss_mlm.detach() if loss_mlm is not None else None,
+            loss_text_mlm=loss_text_mlm.detach() if loss_text_mlm is not None else None,
+        )
+
+        # force_gatherable: to-device and to-tensor if scalar for DataParallel
+        loss, stats, weight = force_gatherable((loss, stats, batch_size), loss.device)
+        return loss, stats, weight
+
+    def _forward(self, batch, speech_segment_pos, y_masks=None):
+        # feats: (Batch, Length, Dim)
+        # -> encoder_out: (Batch, Length2, Dim2)
+        speech_pad_placeholder = batch['speech_pad']
+        # ys_in = self._add_first_frame_and_remove_last_frame(batch['speech_pad'])
+        encoder_out, h_masks = self.encoder(**batch) # segment_emb
+        if self.decoder is not None:
+            # if self.decoder_seg_pos:
+            #     zs, _ = self.decoder(encoder_out, h_masks.bool(),segment_emb)
+            # else:
+            zs, _ = self.decoder(encoder_out, h_masks.bool())
+        else:
+            zs = encoder_out
+        speech_hidden_states = zs[:,:batch['speech_pad'].shape[1], :].contiguous()
+        if self.text_sfc:
+            text_hiddent_states = zs[:,batch['speech_pad'].shape[1]:,:].contiguous()
+            text_outs = self.text_sfc(text_hiddent_states).view(
+            text_hiddent_states.size(0), -1, self.vocab_size)
+        if self.sfc is not None:
+            before_outs = self.sfc(speech_hidden_states).view(
+            speech_hidden_states.size(0), -1, self.odim)
+        else:
+            before_outs = speech_hidden_states
+        if self.postnet is not None:
+            after_outs = before_outs + self.postnet(
+                before_outs.transpose(1, 2)
+            ).transpose(1, 2)
+        else:
+            after_outs = None
+        return before_outs, after_outs,text_outs #, speech_pad_placeholder, batch['masked_position'],batch['text_masked_position']

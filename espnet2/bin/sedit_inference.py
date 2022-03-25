@@ -646,6 +646,8 @@ def decode_with_model(mlm_model, processor, collate_fn, wav_path, old_str, new_s
     feats = collate_fn(batch)[1]
     # wav_len * 80
     set_all_random_seed(9999)
+    if 'text_masked_position' in feats.keys():
+        feats.pop('text_masked_position')
     rtn = mlm_model.inference(**feats,span_boundary=new_span_boundary,use_teacher_forcing=use_teacher_forcing)
     output = rtn['feat_gen'] 
     if 0 in output[0].shape and 0 not in output[-1].shape:
@@ -678,6 +680,8 @@ def decode_for_mcd(model_name, wav_path, old_str, new_str,duration_preditor_path
     feats = collate_fn(batch)[1]
     # wav_len * 80
     set_all_random_seed(9999)
+    if 'text_masked_position' in feats.keys():
+        feats.pop('text_masked_position')
     rtn = mlm_model.inference(**feats,span_boundary=new_span_boundary,use_teacher_forcing=use_teacher_forcing)
     output = rtn['feat_gen'] 
     if 0 in output[0].shape and 0 not in output[-1].shape:
