@@ -608,7 +608,7 @@ class ESPnetMLMDualMaksingModel(ESPnetMLMModel):
             text_segment_pos=text_segment_pos,
             text_masked_position=text_masked_position,
         )
-        before_outs, after_outs, text_outs = self._forward(batch, speech_segment_pos,y_masks)
+        before_outs, after_outs, text_outs, _ = self._forward(batch, speech_segment_pos,y_masks)
 
 
         loss_mlm, loss_text_mlm = self._calc_mlm_loss(
@@ -655,4 +655,4 @@ class ESPnetMLMDualMaksingModel(ESPnetMLMModel):
             ).transpose(1, 2)
         else:
             after_outs = None
-        return before_outs, after_outs,text_outs #, speech_pad_placeholder, batch['masked_position'],batch['text_masked_position']
+        return before_outs, after_outs,text_outs, None #, speech_pad_placeholder, batch['masked_position'],batch['text_masked_position']

@@ -639,6 +639,44 @@ mask_reconstruct=False):
     
     return batch, speech_lengths, old_span_boundary, new_span_boundary
 
+def masked_text_prediction(mlm_model, processor, collate_fn, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False,duration_adjust=True,start_end_sp=False):
+    fs, hop_length = mlm_model.feats_extract.fs, mlm_model.feats_extract.hop_length
+    wav_org, rate = librosa.load(wav_path, sr=mlm_model.feats_extract.fs)
+    fs = mlm_model.feats_extract.fs
+    hop_length = mlm_model.feats_extract.hop_length
+    mfa_start, mfa_end, phns_list, new_phns, span_tobe_replaced, span_tobe_added = get_phns_and_spans(wav_path, old_str, new_str)
+
+    speech = np.array(wav_org,dtype=np.float32)
+    align_start=np.array(mfa_start)
+    align_end =np.array(mfa_end)
+    text = np.array(processor(uid='1', data={'text':" ".join(phns_list)})['text'])
+    span_boundary = np.array([0,0])
+    batch=[('1', {"speech":speech,"align_start":align_start,"align_end":align_end,"text":text,"span_boundary":span_boundary})]
+    speech_lengths = torch.tensor(len(wav_org)).unsqueeze(0)
+    
+    feats = collate_fn(batch)[1]
+    feats['speech_pad'] = feats.pop('speech')
+    feats['text_pad'] = feats.pop('text')
+    feats['text_masked_position'][span_tobe_replaced[0]:span_tobe_replaced[1]] = True 
+    feats.pop('speech_lengths')
+    feats.pop('text_lengths')
+    # wav_len * 80
+    set_all_random_seed(9999)
+
+    before_outs, after_outs, text_outs, _ = mlm_model._forward(feats, feats['speech_segment_pos'], None)
+    return text_outs[0][span_tobe_replaced[0]:span_tobe_replaced[1]], phns_list[span_tobe_replaced[0]:span_tobe_replaced[1]]
+
+def get_text_output(model_name, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False, dynamic_eval=(0,0),duration_adjust=True,start_end_sp=False):
+    if dynamic_eval[0]!=0:
+        mlm_model,processor,collate_fn = dynamic_evaluation(model_name, wav_path, old_str,duration_preditor_path,lr=dynamic_eval[0],steps=dynamic_eval[1])
+    else:
+        mlm_model,train_args = load_model(model_name)
+        mlm_model.eval()
+        processor = MLMTask.build_preprocess_fn(train_args, False)
+        collate_fn = MLMTask.build_collate_fn(train_args, False)
+    return masked_text_prediction(mlm_model, processor, collate_fn, wav_path, old_str, new_str,duration_preditor_path, sid=sid, decoder=decoder, use_teacher_forcing=use_teacher_forcing,
+    duration_adjust=duration_adjust,start_end_sp=start_end_sp),processor
+
 def decode_with_model(mlm_model, processor, collate_fn, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False,duration_adjust=True,start_end_sp=False):
     fs, hop_length = mlm_model.feats_extract.fs, mlm_model.feats_extract.hop_length
 
@@ -911,8 +949,9 @@ def test_cremad(uid, vocoder, model_name="conformer", old_str="", new_str=""):
 
 if __name__ == "__main__":
 
-    fs2_model_path = '/mnt/home/v_baihe/projects/espnet/egs2/libritts/tts1/exp/tts_train_gst+xvector_conformer_fastspeech2_raw_phn_tacotron_g2p_en_no_space/train.loss.ave_5best.pth'
-    fs2_model, fs2_processor = get_fs2_model(fs2_model_path)
+    # fs2_model_path = '/mnt/home/v_baihe/projects/espnet/egs2/libritts/tts1/exp/tts_train_gst+xvector_conformer_fastspeech2_raw_phn_tacotron_g2p_en_no_space/train.loss.ave_5best.pth'
+    # fs2_model, fs2_processor = get_fs2_model(fs2_model_path)
+
     # vctk_vocoder = load_vocoder('vctk_parallel_wavegan.v1.long')
     # uid = "1090_ITS_HAP_XX"
     # model_name="/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/exp/conformer"
@@ -933,12 +972,12 @@ if __name__ == "__main__":
     # new_str="who responded to the unexpected question with dispatch."
     # data_dict = test_ljspeech(uid,vocoder, prefix, model_name, new_str=new_str)
 
-    vocoder = load_vocoder('vctk_parallel_wavegan.v1.long')
-    model_name="/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/exp/conformer"
-    uid = 'p240_016'
-    new_str="The Norsemen considered the rainbow as a bridge over which the gods passed from earth to their home in the sky. Take a look at these pages for crooked creek drive."
-    prefix = '/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/data/tr_no_dev/'
-    data_dict = test_vctk(uid,vocoder,prefix,model_name,new_str=new_str)
+    # vocoder = load_vocoder('vctk_parallel_wavegan.v1.long')
+    # model_name="/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/exp/conformer"
+    # uid = 'p240_016'
+    # new_str="The Norsemen considered the rainbow as a bridge over which the gods passed from earth to their home in the sky. Take a look at these pages for crooked creek drive."
+    # prefix = '/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/data/tr_no_dev/'
+    # data_dict = test_vctk(uid,vocoder,prefix,model_name,new_str=new_str)
 
     # libritts_vocoder = load_vocoder('libritts_parallel_wavegan.v1')
     # model_name="/mnt/home/v_baihe/projects/espnet/egs2/libritts/sedit/exp/conformer"
@@ -949,3 +988,12 @@ if __name__ == "__main__":
     # new_str="[MASK] What music?"
     # data_dict = test_libritts(uid2,libritts_vocoder,os.path.join(prefix,'merged'),model_name,new_str=new_str)
     # display_audios(data_dict,sr=24000)
+
+    # text masking prediction
+    model_name="/mnt/scratch/xiaoran/checkpoints/combine_aishell3_vctk/sedit/exp/conformer_combine_vctk_aishell3_dual_masking_span_10"
+    prefix = '/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/dump/raw/unseen_eval1'
+    uid = 'p225_353'
+    old_str,wav_path = read_data(uid, prefix)
+    old_str = "THE pain was almost too much to bear."
+    new_str="THE pain was [MASK] too much to bear."
+    text_output = get_text_output(model_name, wav_path, old_str, new_str,duration_preditor_path='')
