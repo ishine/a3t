@@ -222,6 +222,78 @@ def alignment(wav_path, text_string):
         i+=1
     return times2,word2phns
 
+def alignment_phns(wav_path, text_string):
+    #MODEL_DIR = '/mnt/home/v_baihe/projects/tools/alignment/aligner/english_phns'
+    tmpbase = '/tmp/' + os.environ['USER'] + '_' + str(os.getpid())
+
+    #prepare wav and trs files
+    try:
+        os.system('sox ' + wav_path + ' -r 16000 ' + tmpbase + '.wav remix -')
+    except:
+        print('sox error!')
+        return None
+    
+    #prepare clean_transcript file
+    try:
+        prep_txt(text_string, tmpbase, MODEL_DIR + '/dict')
+    except:
+        print('prep_txt error!')
+        return None
+
+    #prepare mlf file
+    try:
+        with open(tmpbase + '.txt', 'r') as fid:
+            txt = fid.readline()
+        prep_mlf(txt, tmpbase)
+    except:
+        print('prep_mlf error!')
+        return None
+
+    #prepare scp
+    try:
+        os.system(HCOPY + ' -C ' + MODEL_DIR + '/16000/config ' + tmpbase + '.wav' + ' ' + tmpbase + '.plp')
+    except:
+        print('HCopy error!')
+        return None
+
+    #run alignment
+    try:
+        print(HVITE + ' -a -m -t 10000.0 10000.0 100000.0 -I ' + tmpbase + '.mlf -H ' + MODEL_DIR + '/16000/macros -H ' + MODEL_DIR + '/16000/hmmdefs -i ' + tmpbase +  '.aligned '  + tmpbase + '.dict ' + MODEL_DIR + '/monophones ' + tmpbase + '.plp 2>&1 > /dev/null')
+        os.system(HVITE + ' -a -m -t 10000.0 10000.0 100000.0 -I ' + tmpbase + '.mlf -H ' + MODEL_DIR + '/16000/macros -H ' + MODEL_DIR + '/16000/hmmdefs -i ' + tmpbase +  '.aligned '  + tmpbase + '.dict ' + MODEL_DIR + '/monophones ' + tmpbase + '.plp 2>&1 > /dev/null') 
+    except:
+        print('HVite error!')
+        return None
+
+    with open(tmpbase + '.txt', 'r') as fid:
+        words = fid.readline().strip().split()
+    words = txt.strip().split()
+    words.reverse()
+
+    with open(tmpbase + '.aligned', 'r') as fid:
+        lines = fid.readlines()
+    i = 2
+    times2 = []
+    word2phns = {}
+    current_word = ''
+    index = 0
+    while (i < len(lines)):
+        splited_line = lines[i].strip().split()
+        if (len(splited_line) >= 4) and (splited_line[0] != splited_line[1]):
+            phn = splited_line[2]
+            pst = (int(splited_line[0])/1000+125)/10000
+            pen = (int(splited_line[1])/1000+125)/10000
+            times2.append([phn, pst, pen])
+            # splited_line[-1]!='sp'
+            if len(splited_line)==5:
+                current_word = str(index)+'_'+splited_line[-1]
+                word2phns[current_word] = phn
+                index+=1
+            elif len(splited_line)==4:
+                word2phns[current_word] += ' '+phn 
+        i+=1
+    return times2,word2phns
+
+
 def worker(example):
 
     line_wav, line_text = example

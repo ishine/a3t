@@ -18,7 +18,7 @@ import string
 import numpy as np
 from espnet2.fileio.read_text import read_2column_text,load_num_sequence_text
 from espnet.nets.pytorch_backend.nets_utils import make_non_pad_mask, pad_list,make_pad_mask
-from espnet2.bin.align_english import alignment
+from espnet2.bin.align_english import alignment,alignment_phns
 import librosa
 import random
 from ipywidgets import widgets
@@ -54,7 +54,7 @@ def plot_data(data, figsize=(16, 4), span_boundary=None, titles=None):
         if titles is not None:
             axes[i].title.set_text(titles[i])
 
-def plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str, vocoder,duration_preditor_path,sid=None, non_autoreg=True):
+def plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str, vocoder,duration_preditor_path,sid=None, non_autoreg=True,input_phns=False):
     wav_org, input_feat, output_feat, old_span_boundary, new_span_boundary, fs, hop_length = get_mlm_output(
                                                             model_name,
                                                             wav_path,
@@ -62,7 +62,8 @@ def plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_s
                                                             new_str, 
                                                             duration_preditor_path,
                                                             use_teacher_forcing=non_autoreg,
-                                                            sid=sid
+                                                            sid=sid,
+                                                            input_phns=input_phns
                                                             )
     # return output_feat[new_span_boundary[0]:new_span_boundary[1]]
     plot_data((input_feat.float().data.cpu().numpy().T,
@@ -464,6 +465,43 @@ def get_masked_mel_boundary(mfa_start, mfa_end, fs, hop_length, span_tobe_replac
         span_boundary=[align_start[0].tolist()[span_tobe_replaced[0]],align_end[0].tolist()[span_tobe_replaced[1]-1]]
     return span_boundary
 
+def get_phns_and_spans_with_input_phns(wav_path, old_str, new_str):
+    append_new_str = (old_str == new_str[:len(old_str)])
+    mfa_start, mfa_end = [], []
+    times2,_ = alignment_phns(wav_path, old_str)
+    for item in times2:
+        mfa_start.append(float(item[1]))
+        mfa_end.append(float(item[2]))
+    old_phns = old_str.split()
+    new_phns = new_str.split()
+    span_tobe_replaced = [0,len(old_phns)-1]
+    span_tobe_added = [0,len(new_phns)-1]
+    left_index = 0
+    new_phns_left = []
+    sp_count = 0
+    # find the left different index
+    for idx in range(len(old_phns)):
+        if old_phns[idx] != new_phns[idx]:
+            span_tobe_replaced[0] = idx
+            span_tobe_added[0] = idx
+            break
+    # reverse word2phns and new_word2phns
+    right_index = 0
+    new_phns_right = []
+    sp_count = 0
+    if append_new_str:
+        span_tobe_replaced[0] = len(old_phns)
+        span_tobe_added[0] = len(old_phns)
+        span_tobe_added[1] = len(new_phns)
+        span_tobe_replaced[1] = len(old_phns) - 1
+    else:
+        for idx in range(1,len(new_phns)):
+            if old_phns[-idx] != new_phns[-idx]:
+                span_tobe_added[1] = len(new_phns)-idx
+                span_tobe_replaced[1] = len(old_phns)-idx
+                break
+    return mfa_start, mfa_end, old_phns, new_phns, span_tobe_replaced, span_tobe_added   
+
 def get_phns_and_spans(wav_path, old_str, new_str):
     append_new_str = (old_str == new_str[:len(old_str)])
     old_phns, mfa_start, mfa_end = [], [], []
@@ -553,12 +591,17 @@ def duration_adjust_factor(original_dur, pred_dur, phns):
     return np.average(factor_list[length:-length])
     # return accumulate/length
 
-def prepare_features_with_duration(mlm_model, old_str, new_str, wav_path,duration_preditor_path,sid=None, mask_reconstruct=False,duration_adjust=True,start_end_sp=False):
+def prepare_features_with_duration(mlm_model, old_str, new_str, wav_path,duration_preditor_path,sid=None, mask_reconstruct=False,duration_adjust=True,start_end_sp=False,input_phns=False):
     wav_org, rate = librosa.load(wav_path, sr=mlm_model.feats_extract.fs)
     fs = mlm_model.feats_extract.fs
     hop_length = mlm_model.feats_extract.hop_length
-
+    # if input_phns:
+    #     mfa_start, mfa_end, old_phns, new_phns, span_tobe_replaced, span_tobe_added = get_phns_and_spans_with_input_phns(wav_path, old_str, new_str)
+    # else:
     mfa_start, mfa_end, old_phns, new_phns, span_tobe_replaced, span_tobe_added = get_phns_and_spans(wav_path, old_str, new_str)
+    if input_phns:
+        print('original phns: '+' '.join(new_phns))
+        new_phns = input("new phns:").split()
     if start_end_sp:
         # if new_phns[0]!='sp':
         #     new_phns = ['sp']+new_phns
@@ -624,10 +667,11 @@ def prepare_features_with_duration(mlm_model, old_str, new_str, wav_path,duratio
     return new_wav_org, new_phns, new_mfa_start, new_mfa_end, old_span_boundary, new_span_boundary
 
 def prepare_features(mlm_model,processor, wav_path, old_str,new_str,duration_preditor_path, sid=None,duration_adjust=True,start_end_sp=False,
-mask_reconstruct=False):
+mask_reconstruct=False, input_phns=False):
 
     wav_org, phns_list, mfa_start, mfa_end, old_span_boundary, new_span_boundary = prepare_features_with_duration(mlm_model, old_str, 
-    new_str, wav_path,duration_preditor_path,sid=sid,duration_adjust=duration_adjust,start_end_sp=start_end_sp,mask_reconstruct=mask_reconstruct)
+    new_str, wav_path,duration_preditor_path,sid=sid,duration_adjust=duration_adjust,start_end_sp=start_end_sp,mask_reconstruct=mask_reconstruct,
+    input_phns=input_phns)
     
     speech = np.array(wav_org,dtype=np.float32)
     align_start=np.array(mfa_start)
@@ -668,7 +712,7 @@ def masked_text_prediction(mlm_model, processor, collate_fn, wav_path, old_str, 
 
 def get_text_output(model_name, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False, dynamic_eval=(0,0),duration_adjust=True,start_end_sp=False):
     if dynamic_eval[0]!=0:
-        mlm_model,processor,collate_fn = dynamic_evaluation(model_name, wav_path, old_str,duration_preditor_path,lr=dynamic_eval[0],steps=dynamic_eval[1])
+        mlm_model,processor,collate_fn = dynamic_evaluation(model_name, wav_path, old_str,duration_preditor_path,lr=dynamic_eval[0],steps=dynamic_eval[1],input_phns=input_phns)
     else:
         mlm_model,train_args = load_model(model_name)
         mlm_model.eval()
@@ -677,10 +721,10 @@ def get_text_output(model_name, wav_path, old_str, new_str,duration_preditor_pat
     return masked_text_prediction(mlm_model, processor, collate_fn, wav_path, old_str, new_str,duration_preditor_path, sid=sid, decoder=decoder, use_teacher_forcing=use_teacher_forcing,
     duration_adjust=duration_adjust,start_end_sp=start_end_sp),processor
 
-def decode_with_model(mlm_model, processor, collate_fn, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False,duration_adjust=True,start_end_sp=False):
+def decode_with_model(mlm_model, processor, collate_fn, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False,duration_adjust=True,start_end_sp=False, input_phns=False):
     fs, hop_length = mlm_model.feats_extract.fs, mlm_model.feats_extract.hop_length
 
-    batch,speech_lengths,old_span_boundary,new_span_boundary = prepare_features(mlm_model,processor,wav_path,old_str,new_str,duration_preditor_path, sid,duration_adjust=duration_adjust,start_end_sp=start_end_sp)
+    batch,speech_lengths,old_span_boundary,new_span_boundary = prepare_features(mlm_model,processor,wav_path,old_str,new_str,duration_preditor_path, sid,duration_adjust=duration_adjust,start_end_sp=start_end_sp,input_phns=input_phns)
     feats = collate_fn(batch)[1]
     # wav_len * 80
     set_all_random_seed(9999)
@@ -706,7 +750,7 @@ def decode_with_model(mlm_model, processor, collate_fn, wav_path, old_str, new_s
     return wav_org, input_feat.squeeze(), output_feat, old_span_boundary, new_span_boundary, fs, hop_length
 
 
-def decode_for_mcd(model_name, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=True,mask_reconstruct=False):
+def decode_for_mcd(model_name, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=True,mask_reconstruct=False,input_phns=False):
 
     mlm_model,train_args = load_model(model_name)
     mlm_model.eval()
@@ -714,7 +758,7 @@ def decode_for_mcd(model_name, wav_path, old_str, new_str,duration_preditor_path
     collate_fn = MLMTask.build_collate_fn(train_args, False)
     fs, hop_length = mlm_model.feats_extract.fs, mlm_model.feats_extract.hop_length
 
-    batch,speech_lengths,old_span_boundary,new_span_boundary = prepare_features(mlm_model,processor,wav_path,old_str,new_str,duration_preditor_path, sid,mask_reconstruct=mask_reconstruct)
+    batch,speech_lengths,old_span_boundary,new_span_boundary = prepare_features(mlm_model,processor,wav_path,old_str,new_str,duration_preditor_path, sid,mask_reconstruct=mask_reconstruct,input_phns=input_phns)
     feats = collate_fn(batch)[1]
     # wav_len * 80
     set_all_random_seed(9999)
@@ -742,9 +786,9 @@ def decode_for_mcd(model_name, wav_path, old_str, new_str,duration_preditor_path
 
     return input_feat.squeeze(), output_feat,span_tobe_replaced, old_span_boundary, new_span_boundary
 
-def get_mlm_output(model_name, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False, dynamic_eval=(0,0),duration_adjust=True,start_end_sp=False):
+def get_mlm_output(model_name, wav_path, old_str, new_str,duration_preditor_path, sid=None, decoder=False,use_teacher_forcing=False, dynamic_eval=(0,0),duration_adjust=True,start_end_sp=False,input_phns=False):
     if dynamic_eval[0]!=0:
-        mlm_model,processor,collate_fn = dynamic_evaluation(model_name, wav_path, old_str,duration_preditor_path,lr=dynamic_eval[0],steps=dynamic_eval[1])
+        mlm_model,processor,collate_fn = dynamic_evaluation(model_name, wav_path, old_str,duration_preditor_path,lr=dynamic_eval[0],steps=dynamic_eval[1],input_phns=input_phns)
     else:
         mlm_model,train_args = load_model(model_name)
         mlm_model.eval()
@@ -752,9 +796,9 @@ def get_mlm_output(model_name, wav_path, old_str, new_str,duration_preditor_path
         collate_fn = MLMTask.build_collate_fn(train_args, False)
 
     return decode_with_model(mlm_model, processor, collate_fn, wav_path, old_str, new_str,duration_preditor_path, sid=sid, decoder=decoder, use_teacher_forcing=use_teacher_forcing,
-    duration_adjust=duration_adjust,start_end_sp=start_end_sp)
+    duration_adjust=duration_adjust,start_end_sp=start_end_sp,input_phns=input_phns)
 
-def prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str, vocoder,duration_preditor_path,sid=None, non_autoreg=True, dynamic_eval=(0,0),duration_adjust=True):
+def prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str, vocoder,duration_preditor_path,sid=None, non_autoreg=True, dynamic_eval=(0,0),duration_adjust=True,input_phns=False):
     wav_org, input_feat, output_feat, old_span_boundary, new_span_boundary, fs, hop_length = get_mlm_output(
                                                             model_name,
                                                             wav_path,
@@ -765,7 +809,8 @@ def prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str, v
                                                             sid=sid,
                                                             dynamic_eval=dynamic_eval,
                                                             duration_adjust=duration_adjust,
-                                                            start_end_sp=False
+                                                            start_end_sp=False,
+                                                            input_phns=input_phns
                                                             )
 
     replaced_wav = vocoder(output_feat).detach().float().data.cpu().numpy()
@@ -778,7 +823,7 @@ def prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str, v
                 "new_wav":new_wav}
     return data_dict
 
-def test_libritts(uid, vocoder, prefix='dump/raw/dev-clean/', model_name="conformer",old_str="", new_str="",prompt_decoding=False):
+def test_libritts(uid, vocoder, prefix='dump/raw/dev-clean/', model_name="conformer",old_str="", new_str="",prompt_decoding=False,input_phns=False):
     # uid = "1272_128104_000003_000001"
     duration_preditor_path= duration_path_dict['libritts']
     sid = uid.split('_')[0]
@@ -793,11 +838,11 @@ def test_libritts(uid, vocoder, prefix='dump/raw/dev-clean/', model_name="confor
     if prompt_decoding:
         print(new_str)
         return prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd)
-    print(full_origin_str)
-    results_dict, old_span = plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd)
+    print(full_origin_str,input_phns=input_phns)
+    results_dict, old_span = plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd,input_phns=input_phns)
     return results_dict
 
-def test_vctk(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str="",prompt_decoding=False,dynamic_eval=(0,0)):
+def test_vctk(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str="",prompt_decoding=False,dynamic_eval=(0,0),input_phns=False):
     # sid = uid.split('_')[0]
     # duration_preditor_path = duration_path_dict['vctk']
     # xv_path = '/mnt/home/v_baihe/projects/espnet/aggregate_output/vctk_spk2xvector.pt'
@@ -806,18 +851,18 @@ def test_vctk(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", old_s
     duration_preditor_path = duration_path_dict['ljspeech']
     spemd = None
     full_origin_str,wav_path = read_data(uid, prefix)
-    if not old_str:
+    if not old_str and not input_phns:
         old_str = full_origin_str
     if not new_str:
         new_str = input("input the new string:")
     if prompt_decoding:
         print(new_str)
-        return prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd,dynamic_eval=dynamic_eval)
+        return prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd,dynamic_eval=dynamic_eval,input_phns=input_phns)
     print(full_origin_str)
-    results_dict, old_span = plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd)
+    results_dict, old_span = plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd,input_phns=input_phns)
     return results_dict
 
-def dynamic_evaluation(model_name, wav_path, old_str, duration_preditor_path, lr=5e-5,steps=1):
+def dynamic_evaluation(model_name, wav_path, old_str, duration_preditor_path, lr=5e-5,steps=1,input_phns=False):
     mlm_model,train_args = load_model(model_name)
     optimizer = torch.optim.SGD(mlm_model.parameters(), lr=lr)
     mlm_model.eval()
@@ -829,7 +874,7 @@ def dynamic_evaluation(model_name, wav_path, old_str, duration_preditor_path, lr
     for i in range(len(all_tokens)-1):
         new_str = ' '.join(all_tokens[:i]+['[MASK]']+all_tokens[i+1:])
         wav_org, phns_list, mfa_start, mfa_end, old_span_boundary, new_span_boundary = prepare_features_with_duration(mlm_model, old_str, 
-        new_str, wav_path,duration_preditor_path,sid=None,mask_reconstruct=True)
+        new_str, wav_path,duration_preditor_path,sid=None,mask_reconstruct=True,input_phns=input_phns)
         
         speech = np.array(wav_org,dtype=np.float32)
         align_start=np.array(mfa_start)
@@ -848,7 +893,7 @@ def dynamic_evaluation(model_name, wav_path, old_str, duration_preditor_path, lr
     return mlm_model,processor,collate_fn
 
 
-def prompt_tts_vctk(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str="",prompt_decoding=False,dynamic_eval=0,spemd=None,duration_adjust=True):
+def prompt_tts_vctk(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str="",prompt_decoding=False,dynamic_eval=0,spemd=None,duration_adjust=True,input_phns=False):
     duration_preditor_path = duration_path_dict['ljspeech']
     full_origin_str,wav_path = read_data(uid, prefix)
     if not old_str:
@@ -856,9 +901,9 @@ def prompt_tts_vctk(uid, vocoder, prefix='dump/raw/dev', model_name="conformer",
     if not new_str:
         new_str = input("input the new string:")
     print(new_str)
-    return prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd,dynamic_eval=dynamic_eval,duration_adjust=duration_adjust)
+    return prompt_decoding_fn(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,sid=spemd,dynamic_eval=dynamic_eval,duration_adjust=duration_adjust,input_phns=input_phns)
 
-def plot_vctk(uid, vocoder=None, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str=""):
+def plot_vctk(uid, vocoder=None, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str="",input_phns=False):
     duration_preditor_path = duration_path_dict['ljspeech']
     spemd = None
     full_origin_str,wav_path = read_data(uid, prefix)
@@ -874,7 +919,8 @@ def plot_vctk(uid, vocoder=None, prefix='dump/raw/dev', model_name="conformer", 
                                                             new_str, 
                                                             duration_preditor_path,
                                                             use_teacher_forcing=True,
-                                                            sid=spemd
+                                                            sid=spemd,
+                                                            input_phns=input_phns
                                                             )
     
     fs2_model_path = "/mnt/home/v_baihe/projects/espnet/egs2/vctk/tts1/exp/kan-bayashi/vctk_tts_train_gst+xvector_conformer_fastspeech2_transformer_teacher_raw_phn_tacotron_g2p_en_no_space_train.loss.ave/train.loss.ave_5best.pth"
@@ -891,7 +937,7 @@ def plot_vctk(uid, vocoder=None, prefix='dump/raw/dev', model_name="conformer", 
     return results_dict
 
 
-def plot_ljspeech(uid, vocoder=None, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str=""):
+def plot_ljspeech(uid, vocoder=None, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str="",input_phns=False):
     duration_preditor_path = None#duration_path_dict['ljspeech']
     spemd = None
     full_origin_str,wav_path = read_data(uid, prefix)
@@ -907,7 +953,8 @@ def plot_ljspeech(uid, vocoder=None, prefix='dump/raw/dev', model_name="conforme
                                                             new_str, 
                                                             duration_preditor_path,
                                                             use_teacher_forcing=True,
-                                                            sid=spemd
+                                                            sid=spemd,
+                                                            input_phns=input_phns
                                                             )
     
     fs2_model_path = "/mnt/home/v_baihe/projects/espnet/egs2/ljspeech/tts1/exp/kan-bayashi/ljspeech_tts_train_conformer_fastspeech2_raw_phn_tacotron_g2p_en_no_space_train.loss.ave/train.loss.ave_5best.pth"
@@ -923,7 +970,7 @@ def plot_ljspeech(uid, vocoder=None, prefix='dump/raw/dev', model_name="conforme
 
     return results_dict
 
-def test_ljspeech(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str=""):
+def test_ljspeech(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", old_str="",new_str="",input_phns=False):
     duration_preditor_path = duration_path_dict['ljspeech']
     full_origin_str,wav_path = read_data(uid, prefix)
     print(full_origin_str)
@@ -931,7 +978,7 @@ def test_ljspeech(uid, vocoder, prefix='dump/raw/dev', model_name="conformer", o
         old_str = full_origin_str
     if not new_str:
         new_str = input("input the new string:")
-    results_dict, old_span = plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path)
+    results_dict, old_span = plot_mel_and_vocode_wav(model_name, wav_path,full_origin_str, old_str, new_str,vocoder,duration_preditor_path,input_phns=input_phns)
     return results_dict
 
 def test_cremad(uid, vocoder, model_name="conformer", old_str="", new_str=""):
@@ -972,12 +1019,14 @@ if __name__ == "__main__":
     # new_str="who responded to the unexpected question with dispatch."
     # data_dict = test_ljspeech(uid,vocoder, prefix, model_name, new_str=new_str)
 
-    # vocoder = load_vocoder('vctk_parallel_wavegan.v1.long')
-    # model_name="/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/exp/conformer"
-    # uid = 'p240_016'
-    # new_str="The Norsemen considered the rainbow as a bridge over which the gods passed from earth to their home in the sky. Take a look at these pages for crooked creek drive."
-    # prefix = '/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/data/tr_no_dev/'
-    # data_dict = test_vctk(uid,vocoder,prefix,model_name,new_str=new_str)
+    vocoder = load_vocoder('vctk_parallel_wavegan.v1.long')
+    model_name="/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/exp/conformer"
+    prefix = '/mnt/home/v_baihe/projects/espnet/egs2/vctk/tts1/dump/raw/unseen_eval1/'
+    prompt_uid = 'p226_002'
+    prompt_str= 'Ask her to bring these things with her from the store.'
+    new_str='happy'
+    concat_str = ' '.join([prompt_str,new_str])
+    data_dict = test_vctk(prompt_uid,vocoder,prefix,model_name,old_str=prompt_str,new_str=concat_str,prompt_decoding=True,input_phns=True)
 
     # libritts_vocoder = load_vocoder('libritts_parallel_wavegan.v1')
     # model_name="/mnt/home/v_baihe/projects/espnet/egs2/libritts/sedit/exp/conformer"
@@ -989,11 +1038,11 @@ if __name__ == "__main__":
     # data_dict = test_libritts(uid2,libritts_vocoder,os.path.join(prefix,'merged'),model_name,new_str=new_str)
     # display_audios(data_dict,sr=24000)
 
-    # text masking prediction
-    model_name="/mnt/scratch/xiaoran/checkpoints/combine_aishell3_vctk/sedit/exp/conformer_combine_vctk_aishell3_dual_masking_span_10"
-    prefix = '/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/dump/raw/unseen_eval1'
-    uid = 'p225_353'
-    old_str,wav_path = read_data(uid, prefix)
-    old_str = "THE pain was almost too much to bear."
-    new_str="THE pain was [MASK] too much to bear."
-    text_output = get_text_output(model_name, wav_path, old_str, new_str,duration_preditor_path='')
+    # # text masking prediction
+    # model_name="/mnt/scratch/xiaoran/checkpoints/combine_aishell3_vctk/sedit/exp/conformer_combine_vctk_aishell3_dual_masking_span_10"
+    # prefix = '/mnt/home/v_baihe/projects/espnet/egs2/vctk/sedit/dump/raw/unseen_eval1'
+    # uid = 'p225_353'
+    # old_str,wav_path = read_data(uid, prefix)
+    # old_str = "THE pain was almost too much to bear."
+    # new_str="THE pain was [MASK] too much to bear."
+    # text_output = get_text_output(model_name, wav_path, old_str, new_str,duration_preditor_path='')
